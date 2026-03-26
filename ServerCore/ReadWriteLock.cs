@@ -9,6 +9,15 @@ public sealed class ReadWriteLock
     private const int MAX_SPIN_COUNT = 5000;
     private const long TIMEOUT_MS    = 10_000;
 
+    // ─── Lock Identity (DEBUG) ───
+#if DEBUG
+    /// <summary> Lock ID 자동 증가 카운터 </summary>
+    private static int _nextLockId;
+
+    /// <summary> 이 인스턴스의 고유 Lock ID </summary>
+    private readonly int _lockId = Interlocked.Increment(ref _nextLockId);
+#endif
+
     // ─── State ───
     private volatile int _lockFlag;
 
@@ -17,6 +26,10 @@ public sealed class ReadWriteLock
     {
         int threadId = ThreadManager.CurrentThreadId;
         Debug.Assert(threadId > 0 && threadId <= 0xFFFF);
+
+#if DEBUG
+        DeadLockProfiler.PushLock(_lockId); // 블로킹 전에 데드락 패턴 검사
+#endif
 
         int desired = threadId << 16;
         long startTick = Environment.TickCount64;
@@ -32,7 +45,12 @@ public sealed class ReadWriteLock
                 Thread.Yield();
 
             if (Environment.TickCount64 - startTick > TIMEOUT_MS)
+            {
+#if DEBUG
+                DeadLockProfiler.PopLock(_lockId); // Timeout 시 Push/Pop 균형 유지
+#endif
                 throw new TimeoutException($"WriteLock timeout. ThreadId={threadId}, Flag=0x{_lockFlag:X8}");
+            }
         }
     }
 
@@ -40,6 +58,10 @@ public sealed class ReadWriteLock
     {
         Debug.Assert((_lockFlag & WRITE_MASK) == (ThreadManager.CurrentThreadId << 16));
         Interlocked.Exchange(ref _lockFlag, EMPTY_FLAG);
+
+#if DEBUG
+        DeadLockProfiler.PopLock(_lockId); // 해제 후 스택에서 제거
+#endif
     }
 
     // ─── Read Lock ───
@@ -47,6 +69,10 @@ public sealed class ReadWriteLock
     {
         int threadId = ThreadManager.CurrentThreadId;
         Debug.Assert(threadId > 0);
+
+#if DEBUG
+        DeadLockProfiler.PushLock(_lockId); // 블로킹 전에 데드락 패턴 검사
+#endif
 
         long startTick = Environment.TickCount64;
         int spinCount = 0;
@@ -66,7 +92,12 @@ public sealed class ReadWriteLock
                 Thread.Yield();
 
             if (Environment.TickCount64 - startTick > TIMEOUT_MS)
+            {
+#if DEBUG
+                DeadLockProfiler.PopLock(_lockId); // Timeout 시 Push/Pop 균형 유지
+#endif
                 throw new TimeoutException($"ReadLock timeout. ThreadId={threadId}, Flag=0x{_lockFlag:X8}");
+            }
         }
     }
 
@@ -79,7 +110,12 @@ public sealed class ReadWriteLock
 
             int desired = current - 1;
             if (Interlocked.CompareExchange(ref _lockFlag, desired, current) == current)
+            {
+#if DEBUG
+                DeadLockProfiler.PopLock(_lockId); // CAS 성공 후 스택에서 제거
+#endif
                 return;
+            }
         }
     }
 
